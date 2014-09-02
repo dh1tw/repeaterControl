@@ -9,15 +9,15 @@
 
 //mapping of Output Pins
 const int ONBOARD_LED = 13;
-const int RELAIS_12V = 11;
-const int RELAIS_5V = 10;
-const int RELAIS_230V_PHASE = 9;
-const int RELAIS_230V_NEUTRAL = 8;
+const int RELAIS_12V = 9;
+const int RELAIS_12V_GND = 8;
+const int RELAIS_230V_PHASE = 11;
+const int RELAIS_230V_NEUTRAL = 10;
 
 //mapping of Input Pins
 const int ONE_WIRE_BUS = 12;
 const int ADC_12V = 0;            //ADC
-const int ADC_5V = 1;             //ADC
+const int ADC_TBD = 1;             //ADC
 const int ADC_VSWR_FORWARD = 2;      //ADC
 const int ADC_VSWR_RETURN = 3;       //ADC
 
@@ -65,8 +65,8 @@ float temperatureCabinet = -999;
 float temperatureShack = -999;
 
 // Set the temperature limits when equipment (relais) will be shut off
-const int TEMP_TX_LIMIT_HIGH = 45; //deg Celcius - upper hysteresis level
-const int TEMP_TX_LIMIT_LOW = 40; //deg Celcius -  lower hysteresis level
+const int TEMP_TX_LIMIT_HIGH = 60; //deg Celcius - upper hysteresis level
+const int TEMP_TX_LIMIT_LOW = 55; //deg Celcius -  lower hysteresis level
 
 const int TEMP_CABINET_LIMIT_HIGH = 45; //deg Celcius - upper hysteresis level
 const int TEMP_CABINET_LIMIT_LOW = 40; //deg Celcius -  lower hysteresis level
@@ -99,28 +99,25 @@ int temperature_shack_average = 0;
 //******************************************************************
 
 //define limits
-const int ADC_12V_LOWER_LIMIT_LOW = 452;  // 10,4V lower hysteresis
-const int ADC_12V_LOWER_LIMIT_HIGH = 484;  // 11,0V upper hysteresis
-const int ADC_12V_UPPER_LIMIT_LOW = 652; //14,8V lower hysteresis
-const int ADC_12V_UPPER_LIMIT_HIGH = 681; //15,5V upper hysteresis
-
-int adc_5v_upper_limit = 587;  // 5.5V
-int adc_5v_lower_limit = 480;  // 4.5V
+const int ADC_12V_LOWER_LIMIT_LOW = 432;  // 10,4V lower hysteresis
+const int ADC_12V_LOWER_LIMIT_HIGH = 459;  // 11,0V upper hysteresis
+const int ADC_12V_UPPER_LIMIT_LOW = 615; //14,8V lower hysteresis
+const int ADC_12V_UPPER_LIMIT_HIGH = 645; //15,5V upper hysteresis
 
 const float SWR_LIMIT = 3;
 
 // Variables set True in case limits are exeeded
 bool error_12v = false;
-bool error_5v = false;
 bool error_230v = false;
 bool error_vswr = false;
 
-const int ADC_READINGS = 3;          // number of ADC samples used for averaging
+const int ADC_READINGS = 4;          // number of ADC samples used for averaging
 int adc_index = 0;                  // pointer to the current reading in the arrays 
+
+int startup = true;                // startup phase 
 
 //arrays to store ADC values
 int adc_12v[ADC_READINGS];
-int adc_5v[ADC_READINGS];
 int adc_vswr_forward[ADC_READINGS];
 int adc_vswr_return[ADC_READINGS];
 
@@ -132,13 +129,11 @@ float swr_voltage_return; //reflected voltage
 
 //variables needed to calculate average
 int adc_12v_total = 0;                         
-int adc_5v_total = 0;
 int adc_vswr_forward_total = 0;
 int adc_vswr_return_total = 0;
 
 // average values
 int adc_12v_average = 0;                  
-int adc_5v_average = 0;
 int adc_vswr_forward_average = 0;
 int adc_vswr_return_average = 0;
 
@@ -148,7 +143,6 @@ int adc_vswr_return_average = 0;
 
 //status of output pins
 bool relais_12v = true;
-bool relais_5v = true;
 bool relais_230v_phase = true;
 bool relais_230v_neutral = true;
 bool onboardLedStatus = false;
@@ -158,7 +152,6 @@ bool onboardLedStatus = false;
 // Remote control status tracking variables
 //******************************************************************
 bool remote_12v_off = false;
-bool remote_5v_off = false;
 bool remote_230v_off = false;
 
 
@@ -169,6 +162,7 @@ bool remote_230v_off = false;
 // Counters
 int irq_temp_counter = 0; //pre-scaler for Timer1 -> temperature measurement routine
 int irq_led_blink_counter = 0; //pre-scaler for Timer1 -> status LED blinking
+int irq_startup_counter = 0; //pre-scaler for Timer1 -> startup phase countdown
 int irq_swr_counter = 0; //pre-scaler for Timer1 -> SWR Measurement
 
 
@@ -184,12 +178,12 @@ void setup(void)
   
   pinMode(ONBOARD_LED, OUTPUT);
   pinMode(RELAIS_12V, OUTPUT);
-  pinMode(RELAIS_5V, OUTPUT);
+  pinMode(RELAIS_12V_GND, OUTPUT);
   pinMode(RELAIS_230V_PHASE, OUTPUT);
   pinMode(RELAIS_230V_NEUTRAL, OUTPUT);
 
   //init serial port
-  Serial.begin(9600);
+  Serial.begin(57600);
 
   if (sensors.isConnected(SENSOR_TX)){
     sensors.getAddress(SENSOR_TX, 0);
@@ -208,13 +202,12 @@ void setup(void)
   
   for (int thisReading = 0; thisReading < ADC_READINGS; thisReading++){
     adc_12v[thisReading] = 0;
-    adc_5v[thisReading] = 0;
     adc_vswr_forward[thisReading] = 0;
     adc_vswr_return[thisReading] = 0;
   }
   
   Timer1.initialize(50000); //timer Interrupt every 20ms
-  Timer1.attachInterrupt(checkLimits); //bind function to timer interrupt
+  
 }
 
 //******************************************************************
@@ -264,18 +257,15 @@ void toggleOnboardLed(void){
 void getADCValues(void){
   //substract the last reading  
   adc_12v_total -= adc_12v[adc_index];
-  adc_5v_total -= adc_5v[adc_index];
   adc_vswr_forward_total -= adc_vswr_forward[adc_index];
   adc_vswr_return_total -= adc_vswr_return[adc_index];
   
   adc_12v[adc_index] = analogRead(ADC_12V);
-  adc_5v[adc_index] = analogRead(ADC_5V);
   adc_vswr_forward[adc_index] = analogRead(ADC_VSWR_FORWARD);
   adc_vswr_return[adc_index] = analogRead(ADC_VSWR_RETURN);
 
 
   adc_12v_total += adc_12v[adc_index];
-  adc_5v_total += adc_5v[adc_index];
   adc_vswr_forward_total += adc_vswr_forward[adc_index];
   adc_vswr_return_total += adc_vswr_return[adc_index];
 
@@ -286,7 +276,6 @@ void getADCValues(void){
   }
   
   adc_12v_average = adc_12v_total / ADC_READINGS;
-  adc_5v_average = adc_5v_total / ADC_READINGS;
   adc_vswr_forward_average = adc_vswr_forward_total / ADC_READINGS;
   adc_vswr_return_average = adc_vswr_return_total / ADC_READINGS;
 }
@@ -294,17 +283,14 @@ void getADCValues(void){
 void setRelais12v(bool state){
   if ((state == true) && (overTemperatureTx == false) && (overTemperatureCabinet == false) && (remote_12v_off == false) && (error_vswr == false) && (error_12v == false)){
     digitalWrite(RELAIS_12V, true);
+    digitalWrite(RELAIS_12V_GND, true);    
     relais_12v = true;
   }
   if (state == false){
     digitalWrite(RELAIS_12V, false);
+    digitalWrite(RELAIS_12V_GND, false);
     relais_12v = false;
   }
-}
-
-void setRelais5v(bool state){
-  digitalWrite(RELAIS_5V, state);
-  relais_5v = state;
 }
 
 void setRelais230v(bool state){
@@ -350,6 +336,13 @@ void checkLimits(void){
   }
   
   
+  //countdown timer for startup phase ... approx 2 secs
+  if (irq_startup_counter >= 100){
+    startup = false;
+  }
+  else{
+    irq_startup_counter += 1;
+  }
   
   
   
@@ -359,25 +352,23 @@ void checkLimits(void){
  
   //Handle 12V ADC
   if ((adc_12v_average > ADC_12V_UPPER_LIMIT_HIGH) || (adc_12v_average < ADC_12V_LOWER_LIMIT_LOW)){
-    error_12v = true;
-    setRelais12v(false);
+    if (startup == false){  //during startup phase do not turn off relais
+      error_12v = true;
+      setRelais12v(false);
+    }
   }
   if((adc_12v_average < ADC_12V_UPPER_LIMIT_LOW) && (adc_12v_average > ADC_12V_LOWER_LIMIT_HIGH)){
     error_12v = false;
     setRelais12v(true);
   }
-  
-  //Handle 5V ADC
-  if((adc_5v_average > adc_5v_upper_limit) || (adc_5v_average < adc_5v_lower_limit)){
-    // do smth
-  }
+
  
  
   //Handle Bad SWR
-  if (irq_swr_counter >= 5){ //check approx every 100ms
+  if (irq_swr_counter >= 100){ //check approx every 2s
     float mySWR = calcSWR();
     if (swr_voltage_forward > 50){  //only check SWR if transmitting - power applied
-      vswr = mySWR;
+      vswr = mySWR; // write into global variable
       if(abs(vswr) >= 3){
         setRelais12v(false);
         error_vswr = true; 
@@ -393,8 +384,6 @@ void checkLimits(void){
     irq_swr_counter+=1;
   }
   
- 
-  
 
   
   
@@ -408,7 +397,7 @@ void checkLimits(void){
     //Handle Transmitter Temperature
     if (temperature_tx_average >= TEMP_TX_LIMIT_HIGH){
       overTemperatureTx = true;  //needed to ensure that ADC doesn't enable the 12V again
-      relais_12v = false;
+      setRelais12v(false);
     }
     if (temperature_tx_average <= TEMP_TX_LIMIT_LOW){
       overTemperatureTx = false;
@@ -466,21 +455,19 @@ void printDouble( double val, unsigned int precision){
 void printTemperatures(void){
 
   
-  Serial.print("[");
+  Serial.print("{");
   
-  Serial.print("{'tx': ");
-  Serial.print(temperatureTx);
-  Serial.print("},");
+  Serial.print("\"tx\":");
+  printDouble(temperature_tx_average, 100);
+  Serial.print(", ");
 
-  Serial.print("{'cabinet': ");
-  Serial.print(temperatureCabinet);
-  Serial.print("},");
+  Serial.print("\"cabinet\":");
+  printDouble(temperature_cabinet_average, 100);
+  Serial.print(", ");
 
-  Serial.print("{'shack': ");
-  Serial.print(temperatureShack);
-  Serial.print("}");
-  
-  Serial.println("]");  
+  Serial.print("\"shack\":");
+  printDouble(temperature_shack_average, 100);
+  Serial.println("}");  
 }
 
 
@@ -489,18 +476,14 @@ void printADC(void){
   
   Serial.print("{");
   
-  Serial.print("\"adc_12v\": ");
+  Serial.print("\"adc_12v\":");
  
-  printDouble((double)adc_12v_average/1024*23.78, 100);  //10bit 22k:4,7k voltage divider to cover 0...25V
-  Serial.print(",");
+  printDouble((double)adc_12v_average/1024*23.78+0.35, 100);  //10bit 22k:4,7k voltage divider to cover 0...25V
+  Serial.print(", ");
   
   
-  Serial.print("\"adc_5v\": ");
-  printDouble((double)adc_5v_average/1024*9.6, 100);  //10bit 5k:5k voltage devider to cover 0...10V
-  Serial.print(",");
-  
-  Serial.print("\"vswr\": ");
-  printDouble(vswr, 100);
+  Serial.print("\"vswr\":");
+  printDouble(abs(vswr), 100);
 
   Serial.println("}");
   
@@ -508,90 +491,61 @@ void printADC(void){
 
 void printStatus(void){
  
-  Serial.print("[");  
+  Serial.print("{");  
 
-  Serial.print("{'tx_overheat': ");
+  Serial.print("\"tx_overheat\":");
   if(overTemperatureTx){
     Serial.print("true");
   }
   else{
     Serial.print("false");
   }
-  Serial.print("},");
+  Serial.print(", ");
 
-  Serial.print("{'cabinet_overheat': ");
+  Serial.print("\"cabinet_overheat\":");
   if(overTemperatureCabinet){
     Serial.print("true");
   }
   else{
     Serial.print("false");
   }
-  Serial.print("}");
+  Serial.print(", ");
   
-  Serial.print("{'error_12v': ");
+  Serial.print("\"error_12v\":");
   if(error_12v){
     Serial.print("true");
   }
   else{
     Serial.print("false");
   }
-  Serial.print("},");
+  Serial.print(", ");
     
-
-  Serial.print("{'error_5v': ");
-  if(error_5v){
-    Serial.print("true");
-  }
-  else{
-    Serial.print("false");
-  }  Serial.print("},");
-
-  Serial.print("{'error_vswr': ");
+  Serial.print("\"error_vswr\":");
   if(error_vswr){
     Serial.print("true");
   }
   else{
     Serial.print("false");
-  }  Serial.print("},");
+  }  Serial.print(", ");
 
   
-  Serial.print("{'12v_relais': ");
+  Serial.print("\"12v_relais\":");
   if(relais_12v){
     Serial.print("true");
   }
   else{
     Serial.print("false");
   }  
-  Serial.print("},");  
-  
-  Serial.print("{'relais_5v': ");
-  if(relais_5v){
-    Serial.print("true");
-  }
-  else{
-    Serial.print("false");
-  }  
-  Serial.print("},");
-  
-  Serial.print("{'relais_230v_phase': ");
+  Serial.print(", ");  
+    
+  Serial.print("\"relais_230v\":");
   if(relais_230v_phase){
     Serial.print("true");
   }
   else{
     Serial.print("false");
   }  
-  Serial.print("},");
-  
-  Serial.print("{'relais_230v_neutral': ");
-  if(relais_230v_neutral){
-    Serial.print("true");
-  }
-  else{
-    Serial.print("false");
-  }  
-  Serial.print("}");
-  
-  Serial.println("]"); 
+  Serial.println("}");
 }
 
 
@@ -618,12 +572,13 @@ void checkSerialInput(char inBytes[5]){
     case 'x':{
       switch(inBytes[1]){
         case '1': {
-          setRelais12v(true);
           remote_12v_off = false;
+          error_vswr = false; // reset VSWR Error
+          setRelais12v(true);
           break;
         }        
         case '0': {
-          if ((overTemperatureCabinet == false) && (overTemperatureTx == false) && (error_5v == false)){
+          if ((overTemperatureCabinet == false) && (overTemperatureTx == false)){
             setRelais12v(false);
             remote_12v_off = true;
             break;
@@ -632,26 +587,7 @@ void checkSerialInput(char inBytes[5]){
       }
       break; 
     }
-
-    //turn 5v on/off remotely
-    case 'y':{
-      switch(inBytes[1]){
-        case '1': {
-          setRelais5v(true);
-          remote_5v_off = false;
-          break;
-        }        
-        case '0': {
-          if ((overTemperatureCabinet == false) && (overTemperatureTx == false) && (error_5v == false)){
-            setRelais5v(false);
-            remote_5v_off = true;
-            break;
-          }
-        }
-      }
-      break; 
-    }
-
+    
     //turn 230v on/off remotely
     case 'z':{
       switch(inBytes[1]){
@@ -682,19 +618,22 @@ void loop()
 {
   //startup
   
-  //enable all relais on start
-  digitalWrite(RELAIS_12V, HIGH);
-  digitalWrite(RELAIS_5V, HIGH);
-  digitalWrite(RELAIS_230V_PHASE, HIGH);
-  digitalWrite(RELAIS_230V_NEUTRAL, HIGH);
+  //enable all relais on start first 230V, then 12V
+  setRelais230v(true);
+  getTemperature();  // #1 (3 measurements needed due to averaging)
+  delay(2000);
+  getTemperature();  // #2
+  delay(2000);
+  getTemperature();  // #3
+  setRelais12v(true);
+  delay(4000);
+
+  Timer1.attachInterrupt(checkLimits); //bind function to timer interrupt
   
-  getTemperature();
   char inBytes[20]; 
-  
+   
   //main Loop
   while(true){
-    Serial.println(adc_12v_average);
-    delay(400);
     
     //read commands comming through USB Serial Interface
     if (Serial.available() > 0){
